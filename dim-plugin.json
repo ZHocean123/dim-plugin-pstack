@@ -1,0 +1,9 @@
+{
+  "name": "pstack",
+  "description": "Loads pstack's skills from cursor/plugins into Dim and keeps them on the latest version",
+  "version": "0.1.0",
+  "code": {
+    "entry": "index.ts",
+    "inject": ["skillsCatalog", "settings", "partRegistry"]
+  }
+}

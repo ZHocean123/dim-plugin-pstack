@@ -1,0 +1,8 @@
+{
+  "name": "dim-pstack",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@arcships/rutis": "0.23.0"
+  }
+}
