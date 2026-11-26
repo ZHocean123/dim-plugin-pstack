@@ -7,7 +7,9 @@ pstack's skills are operator-invoked (`disable-model-invocation: true`), so Dim
 lists `setup-pstack` and the plugin's own `pstack` entry skill to the model and
 leaves the rest to `/skill:<name>` — the same `/poteto-mode` workflow pstack
 documents for Cursor. A skill the operator starts reads the other skill files
-from the cache by their relative paths.
+from the cache by their relative paths. The three vendored `cursor-team-kit`
+skills keep their upstream frontmatter, so `deslop`, `control-ui` and
+`control-cli` also reach the model directly.
 
 ## Install
 
@@ -29,7 +31,13 @@ The plugin writes an adapted copy of each installed version at
   models and paths — `Task` → the `agent` tool, `AskQuestion` → `ask_user`,
   `Read`/`Grep`/`Bash` → `read`/`grep`/`exec`, Cursor model slugs →
   `agent({ action: 'models' })` pairs, and Cursor-only steps (Automations,
-  Bugbot, cloud agents, `cursor-team-kit`) → skipped with one line.
+  Bugbot, cloud agents) → skipped with one line.
+- The `deslop`, `control-ui` and `control-cli` skills from Cursor's
+  `cursor-team-kit` plugin are vendored into the adapted copy, and the adapter
+  maps each to Dim's own tools: `exec` and `edit` for `deslop`,
+  `agent-browser` for `control-ui`, and `exec` with tmux or a PTY for
+  `control-cli`. poteto-mode's references to `/deslop` and the control skills
+  therefore run in Dim; they are no longer skipped.
 - Every upstream `SKILL.md` gets one pointer line after its frontmatter: read
   `DIM-ADAPTER.md` once per session first.
 - A model-invocable `pstack` skill is added as the entry point; it names the
@@ -40,16 +48,36 @@ The plugin writes an adapted copy of each installed version at
 The adapter runs on every load and after every install, so it follows upstream
 updates; raise `ADAPTER` in `index.ts` to rebuild copies that already exist.
 
+## Vendored cursor-team-kit skills
+
+pstack's poteto-mode names `deslop`, `control-ui` and `control-cli` from the
+`cursor-team-kit` plugin, which Dim does not load. All three are Markdown with
+no Cursor tool of their own, so the plugin fetches that directory too and
+copies the three skills into the adapted copy at `skills/<name>/`. They load
+like pstack's skills, and their MIT license travels with them as
+`CURSOR-TEAM-KIT-LICENSE`.
+
+The adapter still maps each step to the Dim tool that does the job better:
+
+| Step | Dim |
+| --- | --- |
+| `/deslop` | `exec` for `git diff`, `edit` for the hunks; `no-comments` for the comment pass. |
+| `control-ui` | the `agent-browser` CLI over CDP, including its Electron mode. |
+| `control-cli` | `exec` with tmux or a PTY script; `kero` when running inside Kero. |
+
+A repository without `cursor-team-kit` still installs pstack. The adapter then
+falls back to plain-word instructions for the same outcomes.
+
 ## How it works
 
 - On load the plugin serves the cached copy at once (offline starts keep their
   skills), then checks `cursor/plugins` at the configured ref with
   `git ls-remote`.
-- When the ref moved, it sparse-clones only the `pstack/` directory
-  (`git clone --blob:none --sparse`) into
-  `${XDG_CACHE_HOME:-~/.cache}/dim-pstack/versions/<sha>/pstack`, builds the
-  adapted copy, and registers `<sha>/dim/skills` through Dim's
-  `skillsCatalog`; older versions are pruned.
+- When the ref moved, it sparse-clones the `pstack/` directory and the
+  `cursor-team-kit/` directory (`git clone --blob:none --sparse`) into
+  `${XDG_CACHE_HOME:-~/.cache}/dim-pstack/versions/<sha>/`, builds the adapted
+  copy, and registers `<sha>/dim/skills` through Dim's `skillsCatalog`; older
+  versions are pruned.
 - On a first install there is no cache, so the install runs before the first
   Session starts. Later checks run in the background every `intervalHours`.
 - A failed check keeps the installed copy and reports the error through

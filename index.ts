@@ -15,7 +15,12 @@ import path from 'node:path'
 
 const NAME = 'pstack'
 const KEY = 'pstack'
-const ADAPTER = 1
+const ADAPTER = 2
+// Cursor's cursor-team-kit plugin holds the steps pstack's workflows name but
+// do not ship: /deslop, control-ui and control-cli. They are plain Markdown
+// and run in Dim, so they are vendored into the adapted copy.
+const KIT = 'cursor-team-kit'
+const KIT_SKILLS = ['deslop', 'control-ui', 'control-cli']
 
 const DEFAULTS = {
   repo: 'https://github.com/cursor/plugins',
@@ -36,6 +41,9 @@ type Installed = {
   version: string
   root: string
   at: string
+  // Whether the cursor-team-kit directory came with this copy; null when the
+  // record predates the vendored steps and the copy must be fetched again.
+  kit: boolean | null
 }
 
 const state = {
@@ -64,6 +72,10 @@ function stateFile(): string {
 
 function versionDir(sha: string): string {
   return path.join(state.cache, 'versions', sha)
+}
+
+function kitDir(sha: string): string {
+  return path.join(versionDir(sha), KIT)
 }
 
 function message(error: unknown): string {
@@ -144,6 +156,15 @@ async function pluginVersion(root: string): Promise<string> {
 async function install(options: Options): Promise<Installed> {
   await mkdir(path.join(state.cache, 'versions'), { recursive: true })
   const tmp = path.join(state.cache, `tmp-${process.pid}-${Date.now()}`)
+  // A repository without the kit still installs pstack: the combined sparse
+  // checkout falls back to pstack alone.
+  const sparse = async () => {
+    try {
+      await git(['-C', tmp, 'sparse-checkout', 'set', '--cone', options.subdir, KIT], 120_000)
+    } catch {
+      await git(['-C', tmp, 'sparse-checkout', 'set', '--cone', options.subdir], 120_000)
+    }
+  }
   try {
     if (SHA.test(options.ref)) {
       // A pinned commit: the default branch is shallow, then the commit fetched.
@@ -152,7 +173,7 @@ async function install(options: Options): Promise<Installed> {
         300_000,
       )
       await git(['-C', tmp, 'fetch', '--depth=1', 'origin', options.ref], 300_000)
-      await git(['-C', tmp, 'sparse-checkout', 'set', '--cone', options.subdir], 120_000)
+      await sparse()
       await git(['-C', tmp, 'checkout', '--detach', options.ref], 120_000)
     } else {
       await git(
@@ -168,7 +189,7 @@ async function install(options: Options): Promise<Installed> {
         ],
         300_000,
       )
-      await git(['-C', tmp, 'sparse-checkout', 'set', '--cone', options.subdir], 120_000)
+      await sparse()
     }
     const sha = (await git(['-C', tmp, 'rev-parse', 'HEAD'], 30_000)).trim()
     const source = path.join(tmp, options.subdir)
@@ -178,20 +199,52 @@ async function install(options: Options): Promise<Installed> {
     await rm(versionDir(sha), { recursive: true, force: true })
     await mkdir(path.dirname(target), { recursive: true })
     await rename(source, target)
+    const kitSource = path.join(tmp, KIT)
+    const kit = await exists(kitSource)
+    if (kit) await rename(kitSource, path.join(versionDir(sha), KIT))
 
     return {
       sha,
       version: await pluginVersion(target),
       root: path.join(target, 'skills'),
       at: new Date().toISOString(),
+      kit,
     }
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => {})
   }
 }
 
-function adapterText(root: string): string {
+function adapterText(root: string, kit: boolean): string {
   const models = path.join(state.cache, 'models.md')
+  const controlRows = `| \`control-ui\` for a web, Electron or IDE surface | \`agent-browser\` drives Chromium over CDP from \`exec\`, and its \`electron\` mode covers desktop apps; use the repo's own Playwright or Electron harness when it has one. |
+| \`control-cli\` for a CLI or TUI | \`exec\` with tmux or a PTY script, following the skill's recipes; inside Kero, the \`kero\` skill drives the session. |`
+  const kitSection = kit
+    ? `## cursor-team-kit steps
+
+poteto-mode names three skills from Cursor's \`cursor-team-kit\` plugin. Their
+\`SKILL.md\` files are Markdown with no Cursor tool of their own, so this
+adapted copy vendors them at \`<pstack>/skills/<name>/SKILL.md\`: run them like
+any other skill, with \`exec\` and \`edit\`.
+
+| Step | In Dim |
+| --- | --- |
+| \`/deslop\` before a commit | read \`<pstack>/skills/deslop/SKILL.md\`, then \`exec\` \`git diff\` against the base and \`edit\` the hunks it names. \`no-comments\` reviews the comments as its own pass. |
+${controlRows}
+
+The vendored files are MIT and come from \`cursor/plugins\`. Their license is
+at \`<pstack>/CURSOR-TEAM-KIT-LICENSE\`.
+`
+    : `## cursor-team-kit steps
+
+poteto-mode names three skills from Cursor's \`cursor-team-kit\` plugin, which
+this checkout does not carry. Do the same work with Dim's own tools.
+
+| Step | In Dim |
+| --- | --- |
+| \`/deslop\` before a commit | ask for the outcome in plain words: remove narrating comments, unsupported guards, dead compatibility paths and unrelated edits. \`no-comments\` reviews the comments as its own pass. |
+${controlRows}
+`
   return `# pstack in Dim
 
 Read this file once per session before following any pstack skill. \`<pstack>\`
@@ -257,13 +310,15 @@ or value a Dim tool schema rejects.
 | Transcripts in \`~/.cursor/projects/<slug>/agent-transcripts/\` | Dim's own session history: \`recall\`, or \`dimcode session export\` |
 | \`https://github.com/cursor/plugins/blob/main/pstack/<path>\` | \`<pstack>/<path>\` when the file is there; read the local copy and never fetch it |
 
+${kitSection}
 ## Cursor-only features
 
-Dim has no Cursor Automations, Bugbot, cloud agents, Cursor's built-in PR tool
-or the \`cursor-team-kit\` plugin. When a step needs one, write one line in your
-reply, \`Skipped in Dim: <step>. <reason>.\`, then go on to the next step. Do not
-stop, ask or retry. A PR step that only needs a command is not a skip: run
-\`gh\` through \`exec\`.
+Dim has no Cursor Automations, Bugbot, cloud agents or Cursor's built-in PR
+tool. When a step needs one, write one line in your reply,
+\`Skipped in Dim: <step>. <reason>.\`, then go on to the next step. Do not stop,
+ask or retry. A PR step that only needs a command is not a skip: run \`gh\`
+through \`exec\`. A step that names \`cursor-team-kit\` is not a Cursor-only
+feature either: run it from this copy, or map it in the table above.
 
 ## Differences to respect
 
@@ -277,8 +332,14 @@ stop, ask or retry. A PR step that only needs a command is not a skip: run
 `
 }
 
-function entrySkill(root: string): string {
+function entrySkill(root: string, kit: boolean): string {
   const skills = path.join(root, 'skills')
+  const kitLine = kit
+    ? `- The \`deslop\`, \`control-ui\` and \`control-cli\` skills from Cursor's
+  \`cursor-team-kit\` plugin are vendored here; poteto-mode's references to them
+  resolve to \`${skills}/<name>/SKILL.md\`.
+`
+    : ''
   return `---
 name: pstack
 description: pstack's engineering workflow (poteto-mode, principles, verification, review) installed from cursor/plugins. Use when the user asks for pstack, poteto mode, or a rigorous plan/build/verify workflow, or names a pstack skill.
@@ -290,15 +351,17 @@ This adapted copy lives at \`${root}\`. Its skills are at \`${skills}/<name>/SKI
 and the main one is \`${skills}/poteto-mode/SKILL.md\`.
 
 Before following a pstack skill, read \`${path.join(root, 'DIM-ADAPTER.md')}\` once
-this session: it maps Cursor tool, model and path names to Dim's, and says which
-Cursor-only steps to skip.
+this session: it maps Cursor tool, model and path names to Dim's, maps the
+vendored \`cursor-team-kit\` steps to Dim's tools, and says which Cursor-only
+steps remain skipped.
 
-- The operator starts a skill with \`/skill:<name>\` (for example
-  \`/skill:poteto-mode\`); only \`setup-pstack\` and this skill are
-  model-invocable upstream.
+- pstack marks its own skills \`disable-model-invocation\`, so only this skill
+  and \`setup-pstack\` reach the model; the operator starts the rest with
+  \`/skill:<name>\` (for example \`/skill:poteto-mode\`). The vendored
+  \`deslop\`, \`control-ui\` and \`control-cli\` skills are model-invocable.
 - \`setup-pstack\` picks the model per role; its choices live in
   \`${path.join(state.cache, 'models.md')}\`.
-- \`pstack_status\` and \`pstack_update\` report and refresh this copy.
+${kitLine}- \`pstack_status\` and \`pstack_update\` report and refresh this copy.
 `
 }
 
@@ -339,7 +402,20 @@ async function ensureAdapter(installed: Installed): Promise<string> {
 
   await rm(target, { recursive: true, force: true })
   await cp(base, target, { recursive: true })
-  await writeFile(path.join(target, 'DIM-ADAPTER.md'), adapterText(target), 'utf8')
+  // The kit's steps are plain Markdown, so they ship in the adapted copy.
+  const kitBase = kitDir(installed.sha)
+  let vendored = 0
+  for (const name of KIT_SKILLS) {
+    const from = path.join(kitBase, 'skills', name)
+    if (!(await exists(from))) continue
+    await cp(from, path.join(skills, name), { recursive: true })
+    vendored += 1
+  }
+  if (vendored > 0 && (await exists(path.join(kitBase, 'LICENSE')))) {
+    await cp(path.join(kitBase, 'LICENSE'), path.join(target, 'CURSOR-TEAM-KIT-LICENSE'))
+  }
+  const kit = vendored === KIT_SKILLS.length
+  await writeFile(path.join(target, 'DIM-ADAPTER.md'), adapterText(target, kit), 'utf8')
   for (const entry of await readdir(skills, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
     const file = path.join(skills, entry.name, 'SKILL.md')
@@ -348,7 +424,7 @@ async function ensureAdapter(installed: Installed): Promise<string> {
     await writeFile(file, withAdapterLine(text, target), 'utf8')
   }
   await mkdir(path.join(skills, 'pstack'), { recursive: true })
-  await writeFile(path.join(skills, 'pstack', 'SKILL.md'), entrySkill(target), 'utf8')
+  await writeFile(path.join(skills, 'pstack', 'SKILL.md'), entrySkill(target, kit), 'utf8')
   await writeFile(marker, `${JSON.stringify({ adapter: ADAPTER, at: new Date().toISOString() })}\n`, 'utf8')
 
   state.adapted = skills
@@ -381,6 +457,7 @@ async function loadState(): Promise<Installed | undefined> {
       version: typeof document.version === 'string' ? document.version : 'unknown',
       root: document.root,
       at: typeof document.at === 'string' ? document.at : '',
+      kit: typeof document.kit === 'boolean' ? document.kit : null,
     }
     return (await exists(installed.root)) ? installed : undefined
   } catch {
@@ -414,7 +491,11 @@ async function sync(ctx: any, why: string): Promise<Installed | undefined> {
     state.checkedAt = new Date().toISOString()
     try {
       const sha = await remoteSha(options)
-      if (state.installed?.sha === sha && (await exists(state.installed.root))) {
+      if (
+        state.installed?.sha === sha &&
+        state.installed.kit !== null &&
+        (await exists(state.installed.root))
+      ) {
         if (!state.adapted) await adaptedRoot(state.installed)
         if (!state.registered) await register(ctx, state.installed)
         state.lastError = ''
@@ -501,6 +582,7 @@ async function summary(): Promise<Record<string, unknown>> {
     root: state.installed?.root ?? null,
     skillsRoot: root ?? null,
     adapter: state.adapter || null,
+    kit: state.installed?.kit ?? null,
     skills,
     issues,
     installedAt: state.installed?.at ?? null,
